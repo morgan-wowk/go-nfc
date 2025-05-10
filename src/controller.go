@@ -54,13 +54,20 @@ func (c *Controller) Init(ctx context.Context) {
 
 		logger(ctx).Infof("Device selected: %s", device)
 
-		if err := c.ScanCards(ctx, device); err != nil {
+		readerCtx := c.MaintainReaderConnection(ctx, device)
+
+		if err := c.ScanTags(readerCtx, device); err != nil {
 			logger(ctx).Errorf("Error scanning cards: %s", err.Error())
 			time.Sleep(3 * time.Second)
 			continue
 		}
 
-		break
+		select {
+		case <-ctx.Done():
+			break
+		case <-readerCtx.Done():
+		default:
+		}
 	}
 }
 
@@ -107,7 +114,7 @@ func (c *Controller) SelectDevice(ctx context.Context) (string, error) {
 			var i string
 			_, err = fmt.Scanln(&i)
 			if err != nil {
-				logger(ctx).Errorf("error reading device index: %s", err.Error())
+				logger(ctx).Errorf("Error reading device index: %s", err.Error())
 				deviceNumberInputErrChan <- err
 			}
 
@@ -128,12 +135,12 @@ func (c *Controller) SelectDevice(ctx context.Context) (string, error) {
 
 		deviceIndex, err := strconv.Atoi(deviceNumberInput)
 		if err != nil {
-			logger(ctx).Errorf("unable to parse device number: %s", err.Error())
+			logger(ctx).Errorf("Unable to parse device number: %s", err.Error())
 			continue
 		}
 
 		if deviceIndex < 1 || deviceIndex > len(devices) {
-			logger(ctx).Errorf("invalid device number: %v", deviceNumberInput)
+			logger(ctx).Errorf("Invalid device number: %v", deviceNumberInput)
 			continue
 		}
 
@@ -143,7 +150,8 @@ func (c *Controller) SelectDevice(ctx context.Context) (string, error) {
 	}
 }
 
-func (c *Controller) ScanCards(ctx context.Context, device string) (err error) {
+// ScanTags listens for changes to the state of the reader to detect tag presence and removal
+func (c *Controller) ScanTags(ctx context.Context, device string) (err error) {
 	logger(ctx).Infof("Scanning for tags on device: %s...", device)
 
 	errChan := make(chan error, 1)
@@ -172,13 +180,13 @@ func (c *Controller) ScanCards(ctx context.Context, device string) (err error) {
 				// This controls how long the scard library will be blocking until it detects
 				// a change in state. It should not be too long in order to facilitate graceful
 				// shutdown (e.g. when a kill signal is sent to the application).
-				stateChangeTimeout := time.Second * 5
+				stateChangeTimeout := time.Second * 1
 
 				// Check for change in reader state
 				if err := c.scard.GetStatusChange(readerStates, stateChangeTimeout); err != nil {
 					if !errors.Is(err, scard.ErrTimeout) {
 						errChan <- err
-						return
+						break
 					}
 
 					continue
@@ -232,4 +240,48 @@ func (c *Controller) ScanCards(ctx context.Context, device string) (err error) {
 	wg.Wait()
 
 	return err
+}
+
+// MaintainReaderConnection periodically checks that the reader is still available for communication
+//
+// Returns a context.Context representing a healthy reader connection.
+//
+// When a reader becomes unavailable, the returned context.Context is cancelled.
+func (c *Controller) MaintainReaderConnection(ctx context.Context, device string) context.Context {
+	readerCtx, cancelReaderCtx := context.WithCancel(ctx)
+
+	go func(pctx context.Context, device string) {
+		for {
+			select {
+			case <-pctx.Done():
+				return
+			default:
+				break
+			}
+
+			devices, err := c.scard.ListReaders()
+			if err != nil {
+				logger(pctx).Errorf("Error maintaining reader connection: %s", err.Error())
+			}
+
+			found := false
+			for _, d := range devices {
+				if d == device {
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				logger(pctx).Errorf("Device %s was disconnected", device)
+				cancelReaderCtx()
+				return
+			}
+
+			time.Sleep(time.Second * 5)
+		}
+
+	}(ctx, device)
+
+	return readerCtx
 }
