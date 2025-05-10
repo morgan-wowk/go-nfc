@@ -2,44 +2,90 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/ebfe/scard"
 	"strconv"
+	"sync"
 	"time"
 )
 
 type Controller struct {
 	scard *scard.Context
-	exit  context.CancelFunc
 }
 
-func NewController(scard *scard.Context, exitFunc context.CancelFunc) Controller {
+func NewController(scard *scard.Context) Controller {
 	return Controller{
 		scard: scard,
-		exit:  exitFunc,
 	}
 }
 
 func (c *Controller) Init(ctx context.Context) {
-	c.SelectDevice(ctx)
+	booted := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			break
+		}
+
+		if booted {
+			logger(ctx).Info("Rebooting NFC parser...")
+		} else {
+			logger(ctx).Info("Booting NFC parser...")
+		}
+		booted = true
+
+		device, err := c.SelectDevice(ctx)
+		if err != nil {
+			logger(ctx).Errorf("Error selecting device: %s, rebooting in 3 seconds", err.Error())
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			break
+		}
+
+		logger(ctx).Infof("Device selected: %s", device)
+
+		if err := c.ScanCards(ctx, device); err != nil {
+			logger(ctx).Errorf("Error scanning cards: %s", err.Error())
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		break
+	}
 }
 
-func (c *Controller) SelectDevice(ctx context.Context) {
+// SelectDevice reads NFC devices and prompts the user to select a device
+func (c *Controller) SelectDevice(ctx context.Context) (string, error) {
 	logger(ctx).Infof("Checking for NFC devices...")
 	waitingForDevice := false
 
 	for {
+		select {
+		case <-ctx.Done():
+			return "", nil
+		default:
+			break
+		}
+
 		devices, err := c.scard.ListReaders()
 		if err != nil {
-			logger(ctx).Errorf("error listing devices: %s", err.Error())
-			c.exit()
-			break
+			return "", fmt.Errorf("error listing devices: %w", err)
 		}
 
 		if len(devices) == 0 {
 			if !waitingForDevice {
 				waitingForDevice = true
-				logger(ctx).Error("No devices found. Waiting for device...")
+				logger(ctx).Info("No devices found. Waiting for device...")
 			}
 			time.Sleep(1 * time.Second)
 			continue
@@ -60,7 +106,7 @@ func (c *Controller) SelectDevice(ctx context.Context) {
 
 		deviceIndex, err := strconv.Atoi(deviceNumberInput)
 		if err != nil {
-			logger(ctx).Errorf("error parsing entered device number: %s", err.Error())
+			logger(ctx).Errorf("unable to parse device number: %s", err.Error())
 			continue
 		}
 
@@ -71,8 +117,97 @@ func (c *Controller) SelectDevice(ctx context.Context) {
 
 		device := devices[deviceIndex-1]
 
-		logger(ctx).Infof("Selected device: %s", device)
+		return device, nil
+	}
+}
+
+func (c *Controller) ScanCards(ctx context.Context, device string) (err error) {
+	logger(ctx).Infof("Scanning for tags on device: %s...", device)
+
+	errChan := make(chan error, 1)
+	readerStateChan := make(chan scard.ReaderState)
+
+	scanCtx, cancelCtx := context.WithCancel(ctx)
+	defer cancelCtx()
+
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+
+	go func(pctx context.Context, device string) {
+		readerStates := []scard.ReaderState{
+			{
+				Reader:       device,
+				CurrentState: scard.StateUnaware,
+			},
+		}
+
+		for {
+			select {
+			case <-pctx.Done():
+				break
+			default:
+				// This controls how long the scard library will be blocking until it detects
+				// a change in state. It should not be too long in order to facilitate graceful
+				// shutdown (e.g. when a kill signal is sent to the application).
+				stateChangeTimeout := time.Second * 5
+
+				// Check for change in reader state
+				if err := c.scard.GetStatusChange(readerStates, stateChangeTimeout); err != nil {
+					if !errors.Is(err, scard.ErrTimeout) {
+						errChan <- err
+						return
+					}
+
+					continue
+				}
+
+				// No error above means that the state has changed.
+				// Pass the state change through the channel.
+				readerStateChan <- readerStates[0]
+
+				// Update the current state so the next state change can be detected
+				readerStates[0].CurrentState = readerStates[0].EventState
+
+				continue
+			}
+
+			break
+		}
+
+		wg.Done()
+	}(scanCtx, device)
+
+	for {
+		select {
+		case <-ctx.Done():
+			break
+		case cErr := <-errChan:
+			err = cErr
+			cancelCtx()
+			break
+		case state := <-readerStateChan:
+			// React to change in reader state
+			if state.EventState&scard.StatePresent != 0 {
+				logger(ctx).Info("Tag detected")
+			}
+
+			if state.EventState&scard.StateEmpty != 0 {
+				if state.CurrentState&scard.StatePresent != 0 {
+					logger(ctx).Info("Tag removed from reader")
+				}
+			}
+
+			continue
+		default:
+			time.Sleep(time.Millisecond * 10)
+			continue
+		}
 
 		break
 	}
+
+	wg.Wait()
+
+	return err
 }

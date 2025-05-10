@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/ebfe/scard"
@@ -26,7 +27,8 @@ func main() {
 
 	go func() {
 		sig := <-sigChan
-		logger(ctx).Warnf("received shutdown signal: %v", sig)
+		logger(ctx).Warnf("received kill signal: %v", sig)
+		logger(ctx).Info("shutting down gracefully within 5 seconds...")
 		cancelCtx()
 	}()
 
@@ -54,8 +56,14 @@ func main() {
 		}
 	}()
 
-	controller := NewController(sctx, cancelCtx)
-	controller.Init(ctx)
+	wg := sync.WaitGroup{}
 
-	<-cctx.Done()
+	wg.Add(1)
+	go func(pctx context.Context) {
+		controller := NewController(sctx)
+		controller.Init(pctx)
+		wg.Done()
+	}(cctx)
+
+	wg.Wait()
 }
