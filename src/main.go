@@ -15,7 +15,7 @@ func main() {
 	ctx, err := registerLoggerInContext(context.Background())
 	cctx, cancelCtx := context.WithCancel(ctx)
 
-	sctx, err := scard.EstablishContext()
+	scardCtx, err := scard.EstablishContext()
 	if err != nil {
 		logger(ctx).Errorf("error establishing connection to system: %s", err.Error())
 		return
@@ -32,38 +32,40 @@ func main() {
 		cancelCtx()
 	}()
 
-	defer func() {
-		if sctx != nil {
-			logger(ctx).Info("releasing scard context...")
-			if err := sctx.Release(); err != nil {
-				logger(ctx).Errorf("error closing card context: %s", err.Error())
-			}
-			logger(ctx).Info("scard context released")
-		}
-		if err := releaseLogger(ctx); err != nil {
-			logger(ctx).Warnf("error releasing logger: %s", err.Error())
-		}
-		if r := recover(); r != nil {
-			if err != nil {
-				err = fmt.Errorf("panic occurred after previous error: %+v, error: %s", r, err.Error())
-			} else {
-				err = fmt.Errorf("panic: %+v", r)
-			}
-		}
-		if err != nil {
-			fmt.Printf("program exiting with error: %s\n", err.Error())
-			os.Exit(1)
-		}
-	}()
+	defer cleanup(ctx, scardCtx, err)
 
 	wg := sync.WaitGroup{}
 
 	wg.Add(1)
 	go func(pctx context.Context) {
-		controller := NewController(sctx)
+		controller := NewController(scardCtx)
 		controller.Init(pctx)
 		wg.Done()
 	}(cctx)
 
 	wg.Wait()
+}
+
+func cleanup(ctx context.Context, scardCtx *scard.Context, err error) {
+	if scardCtx != nil {
+		logger(ctx).Info("releasing scard context...")
+		if err := scardCtx.Release(); err != nil {
+			logger(ctx).Errorf("error closing card context: %s", err.Error())
+		}
+		logger(ctx).Info("scard context released")
+	}
+	if err := releaseLogger(ctx); err != nil {
+		logger(ctx).Warnf("error releasing logger: %s", err.Error())
+	}
+	if r := recover(); r != nil {
+		if err != nil {
+			err = fmt.Errorf("panic occurred after previous error: %+v, error: %s", r, err.Error())
+		} else {
+			err = fmt.Errorf("panic: %+v", r)
+		}
+	}
+	if err != nil {
+		fmt.Printf("program exiting with error: %s\n", err.Error())
+		os.Exit(1)
+	}
 }

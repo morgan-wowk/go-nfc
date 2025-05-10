@@ -98,9 +98,31 @@ func (c *Controller) SelectDevice(ctx context.Context) (string, error) {
 
 		var deviceNumberInput string
 
-		_, err = fmt.Scanln(&deviceNumberInput)
+		deviceNumberInputChan := make(chan string)
+		deviceNumberInputErrChan := make(chan error)
+
+		// Use go routine to gather user input to prevent blocking
+		// shutdown when context is cancelled.
+		go func() {
+			var i string
+			_, err = fmt.Scanln(&i)
+			if err != nil {
+				logger(ctx).Errorf("error reading device index: %s", err.Error())
+				deviceNumberInputErrChan <- err
+			}
+
+			deviceNumberInputChan <- i
+		}()
+
+		select {
+		case <-ctx.Done():
+			return "", nil
+		case deviceNumberInput = <-deviceNumberInputChan:
+			break
+		case err = <-deviceNumberInputErrChan:
+			break
+		}
 		if err != nil {
-			logger(ctx).Errorf("error reading device index: %s", err.Error())
 			continue
 		}
 
