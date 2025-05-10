@@ -54,5 +54,8 @@ func main() {
 		}
 	}()
 
+	controller := NewController(sctx, cancelCtx)
+	controller.Init(ctx)
+
 	<-cctx.Done()
 }

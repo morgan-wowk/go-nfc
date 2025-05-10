@@ -15,6 +15,7 @@ const (
 func registerLoggerInContext(ctx context.Context) (context.Context, error) {
 	config := zap.NewDevelopmentConfig()
 	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	config.DisableStacktrace = true
 
 	l, err := config.Build()
 	if err != nil {
