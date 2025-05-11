@@ -9,26 +9,28 @@ import (
 	"syscall"
 
 	"github.com/ebfe/scard"
+	"github.com/morgan-wowk/nfc/logger"
+	"github.com/morgan-wowk/nfc/targets/httptarget"
 )
 
 func main() {
-	ctx, err := registerLoggerInContext(context.Background())
+	ctx, err := logger.RegisterLoggerInContext(context.Background())
 	cctx, cancelCtx := context.WithCancel(ctx)
 
 	scardCtx, err := scard.EstablishContext()
 	if err != nil {
-		logger(ctx).Errorf("error establishing connection to system: %s", err.Error())
+		logger.FromContext(ctx).Errorf("Error establishing connection to system: %s", err.Error())
 		return
 	}
-	logger(ctx).Info("established scard context")
+	logger.FromContext(ctx).Info("Established scard context")
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		sig := <-sigChan
-		logger(ctx).Warnf("received kill signal: %v", sig)
-		logger(ctx).Info("shutting down gracefully within 5 seconds...")
+		logger.FromContext(ctx).Warnf("Received kill signal: %v", sig)
+		logger.FromContext(ctx).Info("Shutting down gracefully within 5 seconds...")
 		cancelCtx()
 	}()
 
@@ -38,8 +40,11 @@ func main() {
 
 	wg.Add(1)
 	go func(pctx context.Context) {
-		controller := NewController(scardCtx)
-		controller.Init(pctx)
+		httpTarget := httptarget.NewHttpTarget("https://google.ca", nil)
+		cardSvc := newCardService(scardCtx, httpTarget)
+
+		c := newController(scardCtx, cardSvc)
+		c.init(pctx)
 		wg.Done()
 	}(cctx)
 
@@ -48,14 +53,14 @@ func main() {
 
 func cleanup(ctx context.Context, scardCtx *scard.Context, err error) {
 	if scardCtx != nil {
-		logger(ctx).Info("releasing scard context...")
+		logger.FromContext(ctx).Info("Releasing scard context...")
 		if err := scardCtx.Release(); err != nil {
-			logger(ctx).Errorf("error closing card context: %s", err.Error())
+			logger.FromContext(ctx).Errorf("Error closing card context: %s", err.Error())
 		}
-		logger(ctx).Info("scard context released")
+		logger.FromContext(ctx).Info("SCard context released")
 	}
-	if err := releaseLogger(ctx); err != nil {
-		logger(ctx).Warnf("error releasing logger: %s", err.Error())
+	if err := logger.ReleaseLogger(ctx); err != nil {
+		logger.FromContext(ctx).Warnf("Error releasing logger: %s", err.Error())
 	}
 	if r := recover(); r != nil {
 		if err != nil {
@@ -65,7 +70,7 @@ func cleanup(ctx context.Context, scardCtx *scard.Context, err error) {
 		}
 	}
 	if err != nil {
-		fmt.Printf("program exiting with error: %s\n", err.Error())
+		fmt.Printf("Program exiting with error: %s\n", err.Error())
 		os.Exit(1)
 	}
 }
