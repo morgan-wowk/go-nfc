@@ -229,17 +229,15 @@ func (c controller) scanTags(ctx context.Context, device string) (err error) {
 			break
 		case diff := <-readerStateChan:
 			// React to change in reader state
-			if diff.newState.EventState&scard.StatePresent != 0 {
+			if diff.newState.EventState&scard.StatePresent != 0 && diff.newState.CurrentState&scard.StateEmpty != 0 {
 				logger.FromContext(ctx).Info("Tag detected")
-				if err := c.cardService.dispatchContentsToTarget(ctx); err != nil {
+				if err := c.cardService.dispatchContentsToTarget(ctx, device); err != nil {
 					logger.FromContext(ctx).Errorf("Error dispatching contents to target: %s", err.Error())
 				}
 			}
 
-			if diff.newState.EventState&scard.StateEmpty != 0 {
-				if diff.newState.CurrentState&scard.StatePresent != 0 {
-					logger.FromContext(ctx).Info("Tag removed from reader")
-				}
+			if diff.newState.EventState&scard.StateEmpty != 0 && diff.newState.CurrentState&scard.StatePresent != 0 {
+				logger.FromContext(ctx).Info("Tag removed from reader")
 			}
 
 			continue
